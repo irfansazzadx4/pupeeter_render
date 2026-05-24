@@ -1,7 +1,8 @@
 const express = require("express");
 const puppeteer = require("puppeteer");
 const cors = require("cors");
-const { execSync } = require("child_process");
+const { execSync, execFileSync } = require("child_process");
+const fs = require("fs");
 
 const FONT_BASE64 = require("./font.b64.js");
 
@@ -12,57 +13,41 @@ app.use(express.json({ limit: "50mb" }));
 const PORT = process.env.PORT || 10000;
 const SECRET = process.env.SECRET || "nid_pdf_secret_2025";
 
-// ─── CHROME PATH ───
-function getChromePath() {
-  // 1. Environment variable থেকে
-  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-    console.log("✅ Chrome from env:", process.env.PUPPETEER_EXECUTABLE_PATH);
-    return process.env.PUPPETEER_EXECUTABLE_PATH;
+// ─── CHROME INSTALL ON STARTUP ───
+function ensureChrome() {
+  const chromePath = "/opt/render/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome";
+  
+  if (fs.existsSync(chromePath)) {
+    console.log("✅ Chrome already exists:", chromePath);
+    return chromePath;
   }
 
-  // 2. Puppeteer auto-detect
+  console.log("🔄 Chrome not found, installing...");
   try {
-    const path = puppeteer.executablePath();
-    if (path) {
-      console.log("✅ Chrome from puppeteer:", path);
-      return path;
-    }
+    execSync("npx puppeteer browsers install chrome", {
+      stdio: "inherit",
+      timeout: 120000,
+    });
+    console.log("✅ Chrome installed!");
   } catch (e) {
-    console.log("⚠️ puppeteer.executablePath() failed:", e.message);
+    console.error("❌ Chrome install failed:", e.message);
   }
 
-  // 3. Manual search
+  // Install হওয়ার পর path find করো
   try {
-    const path = execSync(
+    const found = execSync(
       "find /opt/render/.cache/puppeteer -name 'chrome' -type f 2>/dev/null | head -1"
-    )
-      .toString()
-      .trim();
-    if (path) {
-      console.log("✅ Chrome found via search:", path);
-      return path;
+    ).toString().trim();
+    if (found) {
+      console.log("✅ Chrome found at:", found);
+      return found;
     }
-  } catch (e) {
-    console.log("⚠️ Manual search failed:", e.message);
-  }
+  } catch {}
 
-  // 4. Common paths
-  const commonPaths = [
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium-browser",
-    "/usr/bin/chromium",
-  ];
-  for (const p of commonPaths) {
-    try {
-      execSync(`test -f ${p}`);
-      console.log("✅ Chrome found at common path:", p);
-      return p;
-    } catch {}
-  }
-
-  console.log("❌ Chrome not found anywhere!");
   return null;
 }
+
+let CHROME_PATH = null;
 
 // ─── CSS ───
 function fontCSS() {
@@ -89,12 +74,12 @@ function inject(html) {
 
 // ─── HEALTH CHECK ───
 app.get("/ping", (req, res) => {
-  const chromePath = getChromePath();
   res.json({
     ok: true,
     time: Date.now(),
     fontLoaded: true,
-    chromePath: chromePath || "NOT FOUND",
+    chromePath: CHROME_PATH || "NOT FOUND",
+    chromeExists: CHROME_PATH ? fs.existsSync(CHROME_PATH) : false,
   });
 });
 
@@ -108,16 +93,21 @@ app.post("/pdf", async (req, res) => {
     const { html } = req.body;
     if (!html) return res.status(400).json({ error: "No HTML" });
 
-    const executablePath = getChromePath();
-    if (!executablePath) {
-      return res.status(500).json({
-        error: "Chrome not found. Please check Render build logs.",
-      });
+    // Runtime-এ Chrome না থাকলে আবার install করো
+    if (!CHROME_PATH || !fs.existsSync(CHROME_PATH)) {
+      console.log("⚠️ Chrome missing at runtime, reinstalling...");
+      CHROME_PATH = ensureChrome();
     }
+
+    if (!CHROME_PATH) {
+      return res.status(500).json({ error: "Chrome install failed" });
+    }
+
+    console.log("🖥️ Using Chrome:", CHROME_PATH);
 
     const browser = await puppeteer.launch({
       headless: "new",
-      executablePath,
+      executablePath: CHROME_PATH,
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -137,11 +127,7 @@ app.post("/pdf", async (req, res) => {
     const pdf = await page.pdf({ format: "A4", printBackground: true });
     await browser.close();
 
-    res.json({
-      success: true,
-      pdf: pdf.toString("base64"),
-      size: pdf.length,
-    });
+    res.json({ success: true, pdf: pdf.toString("base64"), size: pdf.length });
   } catch (err) {
     console.error("❌ PDF Error:", err.message);
     res.status(500).json({ error: err.message });
@@ -149,12 +135,7 @@ app.post("/pdf", async (req, res) => {
 });
 
 // ─── START ───
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log("🚀 Server running on port", PORT);
-  const chromePath = getChromePath();
-  if (chromePath) {
-    console.log("✅ Chrome ready:", chromePath);
-  } else {
-    console.log("❌ Chrome NOT found at startup!");
-  }
+  CHROME_PATH = ensureChrome();
 });
