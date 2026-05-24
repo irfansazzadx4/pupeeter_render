@@ -1,7 +1,7 @@
 const express = require("express");
 const puppeteer = require("puppeteer");
 const cors = require("cors");
-const { execSync, execFileSync } = require("child_process");
+const { execSync } = require("child_process");
 const fs = require("fs");
 
 const FONT_BASE64 = require("./font.b64.js");
@@ -13,33 +13,35 @@ app.use(express.json({ limit: "50mb" }));
 const PORT = process.env.PORT || 10000;
 const SECRET = process.env.SECRET || "nid_pdf_secret_2025";
 
-// ─── CHROME INSTALL ON STARTUP ───
+// ─── CHROME ───
 function ensureChrome() {
-  const chromePath = "/opt/render/.cache/puppeteer/chrome/linux-131.0.6778.204/chrome-linux64/chrome";
-  
-  if (fs.existsSync(chromePath)) {
-    console.log("✅ Chrome already exists:", chromePath);
-    return chromePath;
-  }
+  try {
+    const found = execSync(
+      "find /opt/render/.cache/puppeteer -name 'chrome' -type f 2>/dev/null | head -1"
+    ).toString().trim();
+    if (found && fs.existsSync(found)) {
+      console.log("✅ Chrome found:", found);
+      return found;
+    }
+  } catch {}
 
-  console.log("🔄 Chrome not found, installing...");
+  console.log("🔄 Installing Chrome...");
   try {
     execSync("npx puppeteer browsers install chrome", {
       stdio: "inherit",
       timeout: 120000,
     });
-    console.log("✅ Chrome installed!");
   } catch (e) {
     console.error("❌ Chrome install failed:", e.message);
+    return null;
   }
 
-  // Install হওয়ার পর path find করো
   try {
     const found = execSync(
       "find /opt/render/.cache/puppeteer -name 'chrome' -type f 2>/dev/null | head -1"
     ).toString().trim();
-    if (found) {
-      console.log("✅ Chrome found at:", found);
+    if (found && fs.existsSync(found)) {
+      console.log("✅ Chrome installed:", found);
       return found;
     }
   } catch {}
@@ -49,7 +51,7 @@ function ensureChrome() {
 
 let CHROME_PATH = null;
 
-// ─── CSS ───
+// ─── FONT CSS ───
 function fontCSS() {
   return `
 @font-face {
@@ -72,7 +74,7 @@ function inject(html) {
     : style + html;
 }
 
-// ─── HEALTH CHECK ───
+// ─── PING ───
 app.get("/ping", (req, res) => {
   res.json({
     ok: true,
@@ -83,8 +85,9 @@ app.get("/ping", (req, res) => {
   });
 });
 
-// ─── PDF API ───
+// ─── PDF ───
 app.post("/pdf", async (req, res) => {
+  let browser = null;
   try {
     if (req.body.secret !== SECRET) {
       return res.status(403).json({ error: "Unauthorized" });
@@ -93,9 +96,9 @@ app.post("/pdf", async (req, res) => {
     const { html } = req.body;
     if (!html) return res.status(400).json({ error: "No HTML" });
 
-    // Runtime-এ Chrome না থাকলে আবার install করো
+    // Chrome আছে কিনা চেক করো
     if (!CHROME_PATH || !fs.existsSync(CHROME_PATH)) {
-      console.log("⚠️ Chrome missing at runtime, reinstalling...");
+      console.log("⚠️ Chrome missing, reinstalling...");
       CHROME_PATH = ensureChrome();
     }
 
@@ -103,9 +106,7 @@ app.post("/pdf", async (req, res) => {
       return res.status(500).json({ error: "Chrome install failed" });
     }
 
-    console.log("🖥️ Using Chrome:", CHROME_PATH);
-
-    const browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       headless: "new",
       executablePath: CHROME_PATH,
       args: [
@@ -124,18 +125,43 @@ app.post("/pdf", async (req, res) => {
     await page.evaluate(() => document.fonts?.ready);
     await new Promise((r) => setTimeout(r, 1500));
 
-    const pdf = await page.pdf({ format: "A4", printBackground: true });
+    const pdfBuffer = await page.pdf({ format: "A4", printBackground: true });
     await browser.close();
+    browser = null;
 
-    res.json({ success: true, pdf: pdf.toString("base64"), size: pdf.length });
+    // ✅ Header validate করো
+    const header = pdfBuffer.slice(0, 4).toString("ascii");
+    console.log("📄 PDF header:", header, "| Size:", pdfBuffer.length);
+
+    if (header !== "%PDF") {
+      return res.status(500).json({ error: "Puppeteer invalid PDF generated" });
+    }
+
+    // ✅ Base64 encode করো
+    const base64 = pdfBuffer.toString("base64");
+
+    // ✅ Verify: decode করে আবার check করো
+    const verify = Buffer.from(base64, "base64");
+    const verifyHeader = verify.slice(0, 4).toString("ascii");
+    console.log("✅ Verify header:", verifyHeader, "| Size:", verify.length);
+
+    res.json({
+      success: true,
+      pdf: base64,
+      size: pdfBuffer.length,
+    });
+
   } catch (err) {
+    if (browser) {
+      try { await browser.close(); } catch {}
+    }
     console.error("❌ PDF Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
 // ─── START ───
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log("🚀 Server running on port", PORT);
   CHROME_PATH = ensureChrome();
 });
