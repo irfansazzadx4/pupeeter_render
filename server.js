@@ -125,31 +125,33 @@ app.post("/pdf", async (req, res) => {
     await page.evaluate(() => document.fonts?.ready);
     await new Promise((r) => setTimeout(r, 1500));
 
-    const pdfBuffer = await page.pdf({ format: "A4", printBackground: true });
-    await browser.close();
-    browser = null;
+const pdfRaw = await page.pdf({ format: "A4", printBackground: true });
+await browser.close();
+browser = null;
 
-    // ✅ Header validate করো
-    const header = pdfBuffer.slice(0, 4).toString("ascii");
-    console.log("📄 PDF header:", header, "| Size:", pdfBuffer.length);
+// ✅ Uint8Array বা Buffer যাই হোক, Buffer বানাও
+const pdfBuffer = Buffer.isBuffer(pdfRaw) ? pdfRaw : Buffer.from(pdfRaw);
 
-    if (header !== "%PDF") {
-      return res.status(500).json({ error: "Puppeteer invalid PDF generated" });
-    }
+// ✅ Header check
+const header = String.fromCharCode(pdfBuffer[0], pdfBuffer[1], pdfBuffer[2], pdfBuffer[3]);
+console.log("📄 PDF header:", header, "| Size:", pdfBuffer.length);
 
-    // ✅ Base64 encode করো
-    const base64 = pdfBuffer.toString("base64");
+if (header !== "%PDF") {
+  return res.status(500).json({ error: "Invalid PDF: " + header });
+}
 
-    // ✅ Verify: decode করে আবার check করো
-    const verify = Buffer.from(base64, "base64");
-    const verifyHeader = verify.slice(0, 4).toString("ascii");
-    console.log("✅ Verify header:", verifyHeader, "| Size:", verify.length);
+const base64 = pdfBuffer.toString("base64");
 
-    res.json({
-      success: true,
-      pdf: base64,
-      size: pdfBuffer.length,
-    });
+// ✅ Verify
+const verify = Buffer.from(base64, "base64");
+const verifyHeader = String.fromCharCode(verify[0], verify[1], verify[2], verify[3]);
+console.log("✅ Verify:", verifyHeader, "| Size:", verify.length);
+
+res.json({
+  success: true,
+  pdf: base64,
+  size: pdfBuffer.length,
+});
 
   } catch (err) {
     if (browser) {
