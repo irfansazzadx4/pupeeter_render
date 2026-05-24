@@ -1,8 +1,8 @@
 const express = require("express");
 const puppeteer = require("puppeteer");
 const cors = require("cors");
-const https = require("https");
-const http = require("http");
+
+const FONT_BASE64 = require("./font.b64.js");
 
 const app = express();
 app.use(cors());
@@ -11,81 +11,18 @@ app.use(express.json({ limit: "50mb" }));
 const PORT = process.env.PORT || 10000;
 const SECRET = process.env.SECRET || "nid_pdf_secret_2025";
 
-// ─── FONT (Google Fonts থেকে নেওয়া - বেশি reliable) ───
-const FONT_URL =
-  "https://fonts.gstatic.com/s/solaimanlipi/v3/q5u7SOmy6GGizpXmua_risU3V4bKvnqMPH.woff2";
-
-let fontBase64 = null;
-
-// ─── FETCH ───
-function fetchBuffer(url, redirectCount = 0) {
-  return new Promise((resolve, reject) => {
-    if (redirectCount > 5) return reject(new Error("Too many redirects"));
-    const mod = url.startsWith("https") ? https : http;
-    const req = mod.get(url, (res) => {
-      if ([301, 302].includes(res.statusCode)) {
-        return resolve(fetchBuffer(res.headers.location, redirectCount + 1));
-      }
-      if (res.statusCode !== 200) {
-        return reject(new Error("HTTP " + res.statusCode + " for " + url));
-      }
-      const chunks = [];
-      res.on("data", (c) => chunks.push(c));
-      res.on("end", () => resolve(Buffer.concat(chunks)));
-    });
-    req.on("error", reject);
-    req.setTimeout(20000, () => {
-      req.destroy();
-      reject(new Error("Timeout fetching " + url));
-    });
-  });
-}
-
-// ─── LOAD FONT ───
-async function loadFont() {
-  // Multiple fallback URLs
-  const urls = [
-    "https://fonts.gstatic.com/s/solaimanlipi/v3/q5u7SOmy6GGizpXmua_risU3V4bKvnqMPH.woff2",
-    "https://raw.githubusercontent.com/itfoundry/solaimanlipi/master/fonts/SolaimanLipi.ttf",
-    "https://github.com/itfoundry/solaimanlipi/raw/master/fonts/SolaimanLipi.ttf",
-  ];
-
-  for (const url of urls) {
-    try {
-      console.log("🔄 Trying font URL:", url);
-      const buf = await fetchBuffer(url);
-      fontBase64 = buf.toString("base64");
-      console.log("✅ Font loaded from:", url, `(${buf.length} bytes)`);
-      return;
-    } catch (e) {
-      console.log("⚠️ Font URL failed:", url, e.message);
-    }
-  }
-  console.log("❌ All font URLs failed - will use system font");
-}
-
 // ─── CSS ───
 function fontCSS() {
-  if (!fontBase64) {
-    // Fallback: system Bangla fonts
-    return `* { font-family: 'Noto Sans Bengali', Arial, sans-serif !important; }`;
-  }
-
-  // woff2 নাকি ttf সেটা URL দিয়ে বোঝো
-  const isWoff2 = true;
-  const format = isWoff2 ? "woff2" : "truetype";
-  const mimeType = isWoff2 ? "font/woff2" : "font/truetype";
-
   return `
 @font-face {
   font-family: 'SolaimanLipi';
-  src: url('data:${mimeType};base64,${fontBase64}') format('${format}');
+  src: url('data:font/truetype;base64,${FONT_BASE64}') format('truetype');
   font-weight: normal;
   font-style: normal;
   font-display: block;
 }
 * {
-  font-family: 'SolaimanLipi', 'Noto Sans Bengali', Arial, sans-serif !important;
+  font-family: 'SolaimanLipi', Arial, sans-serif !important;
 }`;
 }
 
@@ -99,7 +36,7 @@ function inject(html) {
 
 // ─── HEALTH CHECK ───
 app.get("/ping", (req, res) => {
-  res.json({ ok: true, time: Date.now(), fontLoaded: !!fontBase64 });
+  res.json({ ok: true, time: Date.now(), fontLoaded: true });
 });
 
 // ─── PDF API ───
@@ -112,12 +49,8 @@ app.post("/pdf", async (req, res) => {
     const { html } = req.body;
     if (!html) return res.status(400).json({ error: "No HTML" });
 
-    if (!fontBase64) await loadFont();
-
-    // Chrome executable path - Render cache path
     const executablePath =
-      process.env.PUPPETEER_EXECUTABLE_PATH ||
-      puppeteer.executablePath(); // auto-detect fallback
+      process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath();
 
     console.log("🖥️ Chrome path:", executablePath);
 
@@ -131,7 +64,6 @@ app.post("/pdf", async (req, res) => {
         "--disable-gpu",
         "--single-process",
         "--no-zygote",
-        "--disable-extensions",
       ],
     });
 
@@ -152,5 +84,4 @@ app.post("/pdf", async (req, res) => {
 });
 
 // ─── START ───
-loadFont();
 app.listen(PORT, () => console.log("🚀 Server running on port", PORT));
